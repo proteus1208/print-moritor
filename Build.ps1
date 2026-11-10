@@ -1,7 +1,6 @@
-
 $ErrorActionPreference = "Stop"
 
-$Output = Join-Path $PSScriptRoot "Release"
+$Output = Join-Path $PSScriptRoot "publish"
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
 
 Write-Host "Building PrintArchive..." -ForegroundColor Cyan
@@ -21,11 +20,13 @@ foreach ($Project in $Projects) {
         -r win-x64 `
         --self-contained true `
         -p:PublishSingleFile=true `
-        -o "$Output"
-    
+        -p:IncludeNativeLibrariesForSelfExtract=true `
+        -o $Output
+
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to publish $Project"
     }
 }
 
 Write-Host "Build completed: $Output" -ForegroundColor Green
+Get-ChildItem $Output -File | Select-Object Name, Length | Format-Table -AutoSize

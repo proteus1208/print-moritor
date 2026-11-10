@@ -1,0 +1,167 @@
+using System.Text.Json;
+
+namespace PrintArchive.Core;
+
+/// <summary>
+/// Primary archive facade: SQLite metadata + encrypted document files.
+/// Migrates legacy jobs.index.enc on first open when present.
+/// </summary>
+public sealed class ArchiveStore : IDisposable
+{
+    private readonly JobDatabase _db;
+    private readonly CryptoService _crypto;
+
+    public ArchiveStore(CryptoService crypto, string? databasePath = null)
+    {
+        _crypto = crypto;
+        _db = new JobDatabase(databasePath);
+        TryMigrateLegacyIndex();
+    }
+
+    public CryptoService Crypto => _crypto;
+    public JobDatabase Database => _db;
+
+    public void Add(PrintJobRecord record)
+    {
+        if (record.EventRecordId is long eid && _db.ExistsByEventRecordId(eid))
+            return;
+        if (_db.ExistsById(record.Id))
+            return;
+        _db.Upsert(record);
+    }
+
+    public List<PrintJobRecord> ReadAll() => _db.Query();
+
+    public List<PrintJobRecord> Query(
+        string? search = null,
+        string? printer = null,
+        DateTimeOffset? from = null,
+        DateTimeOffset? to = null) =>
+        _db.Query(search, printer, from, to);
+
+    public PrintJobRecord? Get(string id) => _db.GetById(id);
+
+    public void DeleteRecord(string id)
+    {
+        var record = _db.GetById(id);
+        if (record is null) return;
+
+        TryDeleteFile(record.ArchiveFilePath);
+        TryDeleteFile(record.ScreenshotPath);
+        string jobDir = Path.Combine(ArchivePaths.Jobs, id);
+        if (Directory.Exists(jobDir))
+        {
+            try { Directory.Delete(jobDir, true); } catch { /* best effort */ }
+        }
+        _db.Delete(id);
+    }
+
+    public string? ArchiveOriginalFile(string jobId, string sourcePath)
+    {
+        if (!File.Exists(sourcePath)) return null;
+        string ext = Path.GetExtension(sourcePath);
+        string dest = Path.Combine(ArchivePaths.Jobs, jobId, "original" + ext + ".enc");
+        _crypto.EncryptFile(sourcePath, dest);
+        return dest;
+    }
+
+    public string DecryptToTemp(PrintJobRecord job)
+    {
+        if (string.IsNullOrWhiteSpace(job.ArchiveFilePath) || !File.Exists(job.ArchiveFilePath))
+            throw new FileNotFoundException("No archived document is available for this job.");
+
+        string session = Path.Combine(ArchivePaths.Temp, Environment.ProcessId.ToString(), job.Id);
+        Directory.CreateDirectory(session);
+
+        string name = Path.GetFileName(job.ArchiveFilePath);
+        if (name.EndsWith(".enc", StringComparison.OrdinalIgnoreCase))
+            name = name[..^4];
+        if (name.StartsWith("original", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(job.OriginalFilePath))
+            name = Path.GetFileName(job.OriginalFilePath);
+        else if (string.IsNullOrWhiteSpace(Path.GetExtension(name)))
+            name = SanitizeFileName(job.DocumentName);
+
+        string dest = Path.Combine(session, name);
+        _crypto.DecryptFile(job.ArchiveFilePath, dest);
+        File.SetAttributes(dest, FileAttributes.Temporary);
+        return dest;
+    }
+
+    public void Export(PrintJobRecord job, string destinationPath)
+    {
+        if (string.IsNullOrWhiteSpace(job.ArchiveFilePath) || !File.Exists(job.ArchiveFilePath))
+            throw new FileNotFoundException("No archived document is available for this job.");
+        Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
+        _crypto.DecryptFile(job.ArchiveFilePath, destinationPath);
+    }
+
+    private void TryMigrateLegacyIndex()
+    {
+        if (!File.Exists(ArchivePaths.LegacyIndex)) return;
+        if (_db.Count() > 0) return;
+
+        try
+        {
+            byte[] json = _crypto.Decrypt(File.ReadAllBytes(ArchivePaths.LegacyIndex));
+            using var doc = JsonDocument.Parse(json);
+            foreach (var element in doc.RootElement.EnumerateArray())
+            {
+                var record = new PrintJobRecord
+                {
+                    Id = GetString(element, "Id") ?? Guid.NewGuid().ToString("N"),
+                    JobId = GetInt(element, "JobId"),
+                    EventRecordId = GetLong(element, "EventRecordId"),
+                    DocumentName = GetString(element, "DocumentName") ?? "Unknown document",
+                    Username = GetString(element, "UserName") ?? GetString(element, "Username") ?? "Unknown user",
+                    PrinterName = GetString(element, "PrinterName") ?? "Unknown printer",
+                    Timestamp = GetDate(element, "Timestamp") ?? DateTimeOffset.Now,
+                    PageCount = GetInt(element, "Pages") ?? GetInt(element, "PageCount"),
+                    DataSize = GetLong(element, "SpoolBytes") ?? GetLong(element, "DataSize"),
+                    OriginalFilePath = GetString(element, "OriginalPath") ?? GetString(element, "OriginalFilePath"),
+                    ArchiveFilePath = GetString(element, "ArchiveFilePath"),
+                    ScreenshotPath = GetString(element, "ScreenshotPath"),
+                    CaptureStatus = GetString(element, "CaptureStatus") ?? "MetadataOnly",
+                    ClientComputer = GetString(element, "ClientComputer"),
+                    UserSid = GetString(element, "UserSid"),
+                };
+                _db.Upsert(record);
+            }
+
+            string bak = ArchivePaths.LegacyIndex + ".migrated";
+            File.Move(ArchivePaths.LegacyIndex, bak, true);
+        }
+        catch
+        {
+            // Leave legacy file in place if migration fails; service can retry later.
+        }
+    }
+
+    private static string? GetString(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+
+    private static int? GetInt(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetInt32(out var v) ? v : null;
+
+    private static long? GetLong(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetInt64(out var v) ? v : null;
+
+    private static DateTimeOffset? GetDate(JsonElement e, string name) =>
+        e.TryGetProperty(name, out var p) && p.ValueKind == JsonValueKind.String &&
+        DateTimeOffset.TryParse(p.GetString(), out var d) ? d : null;
+
+    private static void TryDeleteFile(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
+        try { File.Delete(path); } catch { /* best effort */ }
+    }
+
+    private static string SanitizeFileName(string name)
+    {
+        foreach (char c in Path.GetInvalidFileNameChars())
+            name = name.Replace(c, '_');
+        return string.IsNullOrWhiteSpace(name) ? "document.bin" : name;
+    }
+
+    public void Dispose() => _db.Dispose();
+}

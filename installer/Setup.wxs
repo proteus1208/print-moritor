@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Optional WiX skeleton. Prefer Setup.ps1 for current releases.
+  Build with WiX Toolset v4+ when packaging an MSI:
+    wix build Setup.wxs -o PrintArchive.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="PrintArchive" Manufacturer="PrintArchive" Version="1.0.0" UpgradeCode="A1B2C3D4-E5F6-4789-A012-3456789ABCDE">
+    <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
+    <Feature Id="Main">
+      <Component Directory="INSTALLFOLDER" Id="AppFiles">
+        <File Source="..\publish\PrintArchive.Service.exe" />
+        <File Source="..\publish\PrintArchive.Agent.exe" />
+        <File Source="..\publish\PrintArchive.UI.exe" />
+        <ServiceInstall Id="PrintArchiveService" Name="PrintArchive" DisplayName="PrintArchive"
+                        Description="Monitors completed print jobs and archives encrypted metadata/documents"
+                        Start="auto" Type="ownProcess" ErrorControl="normal" />
+        <ServiceControl Id="StartService" Name="PrintArchive" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+      </Component>
+    </Feature>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="PrintArchive" />
+    </StandardDirectory>
+  </Package>
+</Wix>

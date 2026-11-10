@@ -1,1 +1,10 @@
-powershell -ExecutionPolicy Bypass -File .\Build.ps1
+1. On Windows, open PowerShell in this folder:
+
+   powershell -ExecutionPolicy Bypass -File .\Build.ps1
+
+2. Install (elevated PowerShell):
+
+   powershell -ExecutionPolicy Bypass -File .\installer\Setup.ps1
+
+3. Create your password when the UI opens.
+4. Print something, then press Ctrl+Alt+F12 to open History.

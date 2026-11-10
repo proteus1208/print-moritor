@@ -12,12 +12,11 @@ public sealed class PrintMonitorWorker : BackgroundService
     private readonly ILogger<PrintMonitorWorker> _logger;
     private EventLogWatcher? _watcher;
     private ArchiveStore? _store;
+    private StorageManager? _storage;
+    private CryptoService? _crypto;
 
     private const string PrintLog = "Microsoft-Windows-PrintService/Operational";
-    private static readonly string LogDirectory = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-        "PrintArchive", "logs");
-    private static readonly string LogFile = Path.Combine(LogDirectory, "service.log");
+    private static readonly string LogFile = Path.Combine(ArchivePaths.Logs, "service.log");
     private static readonly object FileLock = new();
 
     public PrintMonitorWorker(ILogger<PrintMonitorWorker> logger) => _logger = logger;
@@ -26,7 +25,7 @@ public sealed class PrintMonitorWorker : BackgroundService
     {
         try
         {
-            Directory.CreateDirectory(LogDirectory);
+            Directory.CreateDirectory(ArchivePaths.Logs);
             lock (FileLock)
                 File.AppendAllText(LogFile,
                     $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}{Environment.NewLine}");
@@ -40,15 +39,20 @@ public sealed class PrintMonitorWorker : BackgroundService
         try
         {
             ArchivePaths.EnsureCreated();
+            TempFileManager.CleanupOrphans(TimeSpan.FromHours(1));
+
             var key = ServiceKeyStore.LoadOrCreate();
-            _store = new ArchiveStore(new CryptoService(key));
+            _crypto = new CryptoService(key);
+            _store = new ArchiveStore(_crypto);
+            _storage = new StorageManager(_store);
 
             var query = new EventLogQuery(PrintLog, PathType.LogName,
                 "*[System[(EventID=307)]]");
             _watcher = new EventLogWatcher(query);
             _watcher.EventRecordWritten += OnEventRecordWritten;
             _watcher.Enabled = true;
-            WriteLog("SUCCESS: EventLogWatcher enabled; encrypted metadata store initialized.");
+
+            WriteLog("SUCCESS: EventLogWatcher enabled; SQLite archive initialized.");
             _logger.LogInformation("PrintArchive is monitoring Windows print events.");
         }
         catch (Exception ex)
@@ -64,11 +68,17 @@ public sealed class PrintMonitorWorker : BackgroundService
     private void OnEventRecordWritten(object? sender, EventRecordWrittenEventArgs e)
     {
         if (e.EventException != null) { WriteLog($"EVENT ERROR: {e.EventException}"); return; }
-        if (e.EventRecord == null) return;
+        if (e.EventRecord == null || _store is null) return;
 
         using var record = e.EventRecord;
         try
         {
+            if (record.RecordId is long existingId && _store.Database.ExistsByEventRecordId(existingId))
+            {
+                WriteLog($"SKIP DUPLICATE: RecordID={existingId}");
+                return;
+            }
+
             string xml = record.ToXml();
             var values = ParseEvent(xml);
             var timestamp = record.TimeCreated.HasValue
@@ -77,26 +87,59 @@ public sealed class PrintMonitorWorker : BackgroundService
             string id = record.RecordId?.ToString(CultureInfo.InvariantCulture)
                 ?? Guid.NewGuid().ToString("N");
 
-            var job = new PrintJobRecord(
-                Id: id,
-                Timestamp: timestamp,
-                DocumentName: Get(values, "Param2", "Unknown document"),
-                PrinterName: Get(values, "Param5", "Unknown printer"),
-                UserName: Get(values, "Param3", "Unknown user"),
-                ClientComputer: NullIfEmpty(Get(values, "Param4", "")),
-                JobId: TryInt(Get(values, "Param1", "")),
-                Pages: TryInt(Get(values, "Param8", "")),
-                SpoolBytes: TryLong(Get(values, "Param7", "")),
-                CaptureStatus: "Metadata only — source file not captured",
-                OriginalPath: null,
-                ScreenshotPath: null,
-                EventRecordId: record.RecordId,
-                UserSid: record.UserId?.Value);
+            string documentName = Get(values, "Param2", "Unknown document");
+            string username = Get(values, "Param3", "Unknown user");
+            string printerName = Get(values, "Param5", "Unknown printer");
+            long? dataSize = TryLong(Get(values, "Param7", ""));
 
-            _store?.Add(job);
-            WriteLog($"ARCHIVED METADATA: EventID={record.Id}, RecordID={record.RecordId}, " +
-                     $"Job={job.JobId}, Document={job.DocumentName}, Printer={job.PrinterName}, " +
-                     $"Pages={job.Pages}, Bytes={job.SpoolBytes}");
+            var capture = DocumentCapture.TryCapture(documentName, username);
+            string? archivePath = null;
+            string? originalPath = capture.Path;
+
+            if (capture.Result == CaptureResult.OriginalCaptured && originalPath is not null)
+            {
+                try
+                {
+                    long fileBytes = new FileInfo(originalPath).Length;
+                    _storage?.EnforceQuota(fileBytes);
+                    archivePath = _store.ArchiveOriginalFile(id, originalPath);
+                }
+                catch (Exception ex)
+                {
+                    WriteLog($"CAPTURE ENCRYPT ERROR: {ex.Message}");
+                    capture = CaptureAttempt.MetadataOnly($"Found {originalPath} but encrypt failed: {ex.Message}");
+                    originalPath = capture.Path;
+                    archivePath = null;
+                }
+            }
+            else
+            {
+                _storage?.EnforceQuota(0);
+            }
+
+            var job = new PrintJobRecord
+            {
+                Id = id,
+                Timestamp = timestamp,
+                DocumentName = documentName,
+                PrinterName = printerName,
+                Username = username,
+                ClientComputer = NullIfEmpty(Get(values, "Param4", "")),
+                JobId = TryInt(Get(values, "Param1", "")),
+                PageCount = TryInt(Get(values, "Param8", "")),
+                DataSize = dataSize,
+                CaptureStatus = capture.StatusText,
+                OriginalFilePath = originalPath,
+                ArchiveFilePath = archivePath,
+                ScreenshotPath = null,
+                EventRecordId = record.RecordId,
+                UserSid = record.UserId?.Value
+            };
+
+            _store.Add(job);
+            WriteLog($"ARCHIVED: RecordID={record.RecordId}, Job={job.JobId}, " +
+                     $"Document={job.DocumentName}, Printer={job.PrinterName}, " +
+                     $"Pages={job.PageCount}, Bytes={job.DataSize}, Status={job.CaptureStatus}");
         }
         catch (Exception ex)
         {
@@ -109,11 +152,24 @@ public sealed class PrintMonitorWorker : BackgroundService
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var document = XDocument.Parse(xml);
+
+        // Named ParamN elements (common on recent Windows).
         foreach (var element in document.Descendants())
         {
             if (element.Name.LocalName.StartsWith("Param", StringComparison.OrdinalIgnoreCase))
                 result[element.Name.LocalName] = element.Value;
         }
+
+        // Fallback: EventData/Data positional mapping used by some builds.
+        if (!result.ContainsKey("Param1"))
+        {
+            var dataNodes = document.Descendants()
+                .Where(x => x.Name.LocalName == "Data")
+                .ToList();
+            for (int i = 0; i < dataNodes.Count; i++)
+                result["Param" + (i + 1)] = dataNodes[i].Value;
+        }
+
         return result;
     }
 
@@ -132,6 +188,8 @@ public sealed class PrintMonitorWorker : BackgroundService
             _watcher.Dispose();
             _watcher = null;
         }
+        _store?.Dispose();
+        _crypto?.Dispose();
         base.Dispose();
     }
 }

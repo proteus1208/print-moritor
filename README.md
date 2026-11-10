@@ -1,78 +1,79 @@
-# PrintArchive — Windows C# starter project
+# PrintArchive
 
-This is a Windows-only, self-contained-deployment starter solution for a local print archive.
+Windows print-job archive: monitors PrintService Event ID 307, stores structured history in SQLite, encrypts captured originals with AES-256-GCM, and unlocks a History UI with a password-wrapped master key.
 
-## What is implemented
-- Windows Worker Service project intended to run as an automatic Windows service.
-- PrintService Operational event listener for completed print jobs (Event ID 307).
-- Parses the Event ID 307 XML fields and writes encrypted print-job metadata to the archive index.
-- AES-256-GCM encrypted archive-file helper.
-- Password-derived key helper (PBKDF2-SHA256) and Windows DPAPI service-key protection helper.
-- Hidden login Agent with Ctrl+Alt+F12 global hotkey.
-- WPF unlock/history/settings UI shell.
-- Storage quota cleanup model and metadata models.
-- Installer packaging notes.
+## What works
 
-## Important status / limitations
-This is a **starter implementation, not a production-ready recorder**. Windows print events do not reliably expose the original source-file path, application executable, complete settings, or printable content. The source resolver is deliberately conservative and records the best available document name; it does not pretend that a spool file is the original DOCX/PSD/PDF.
+- Windows service listening for completed print jobs (Event ID 307)
+- XML event parsing with duplicate protection (`EventRecordId`)
+- SQLite job database at `%ProgramData%\PrintArchive\jobs.db`
+- Best-effort original-file capture + encrypted document storage
+- Password enrollment / unlock / change (wraps the archive master key)
+- History UI: search, date filter, printer filter, details, open, export, delete
+- Storage quota (default 5 GB) with oldest-job cleanup
+- Temp decrypted-file tracking and crash/reboot cleanup
+- Self-contained `win-x64` publish (no separate .NET runtime)
+- Full installer script: service, agent logon task, folders, ACLs, password prompt
 
-The project does not yet implement robust per-application document-path correlation, universal spool rendering to PDF, or guaranteed screenshot capture. Those require additional per-application integrations and interactive-session testing. Screenshots are intentionally not silently captured by this starter. Add a clear user-visible capture policy and permissions before enabling them.
+## Limits
 
-The service now writes metadata-only records to an encrypted JSON index at `%ProgramData%\PrintArchive\jobs.index.enc`. The UI currently provides an unlock shell and archive listing foundation; it is not yet connected to that index. The service-key helper uses DPAPI LocalMachine so the service can encrypt while the UI is locked; this protects against casual file inspection but **does not protect the archive from a local administrator or malware running as SYSTEM**. A password-derived wrapping key is provided as a building block, but production key lifecycle and recovery need a security review.
-
-Temporary decrypted-file opening and reliable cleanup-on-close are not enabled in this starter. Do not treat file deletion as guaranteed secure erasure, especially on SSDs.
+- Windows print events do **not** include the original document path. Capture succeeds only when the document title can be resolved to a real file.
+- DPAPI LocalMachine lets the service encrypt while the UI is locked; a local administrator can still access the service key.
+- Temp-file overwrite-before-delete is best-effort (not guaranteed secure erase on SSDs).
+- Screenshots and universal rendered-PDF capture are not enabled.
 
 ## Requirements
-- Windows 10/11 x64.
-- Visual Studio 2026 or .NET 10 SDK.
-- Administrator rights to install the Windows service.
-- WPF desktop support.
+
+- Windows 10/11 x64
+- .NET 10 SDK (build machine only)
+- Administrator rights to install the service
 
 ## Build
-From this directory on Windows:
 
 ```powershell
-dotnet restore .\PrintArchive.sln
-dotnet build .\PrintArchive.sln -c Release
+powershell -ExecutionPolicy Bypass -File .\Build.ps1
 ```
 
-Publish each executable self-contained:
+Output goes to `.\publish\` (self-contained single-file exes).
+
+## Install
+
+Elevated PowerShell:
 
 ```powershell
-dotnet publish .\src\PrintArchive.Service\PrintArchive.Service.csproj -c Release -r win-x64 --self-contained true
-dotnet publish .\src\PrintArchive.Agent\PrintArchive.Agent.csproj -c Release -r win-x64 --self-contained true
-dotnet publish .\src\PrintArchive.UI\PrintArchive.UI.csproj -c Release -r win-x64 --self-contained true
+powershell -ExecutionPolicy Bypass -File .\installer\Setup.ps1
 ```
 
-The resulting application bundles the .NET runtime. End users do not need to install .NET separately.
+Uninstall (keeps `%ProgramData%\PrintArchive` data):
 
-## Run during development
-Run the service elevated:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\installer\Setup.ps1 -Uninstall
+```
+
+## Daily use
+
+1. Service archives jobs automatically.
+2. Press **Ctrl+Alt+F12** (or use the Agent tray icon) to open the UI.
+3. Unlock with your password.
+4. Double-click a row (or Open) to decrypt to a temp folder and launch the file.
+
+## Archive layout
+
+```
+%ProgramData%\PrintArchive\
+  jobs.db
+  vault.bin
+  service.key.dpapi
+  settings.json
+  Archive\Jobs\<id>\original*.enc
+  Temp\
+  Logs\service.log
+```
+
+## Development run
 
 ```powershell
 dotnet run --project .\src\PrintArchive.Service
-```
-
-Run the Agent in the interactive logged-in session:
-
-```powershell
 dotnet run --project .\src\PrintArchive.Agent
+dotnet run --project .\src\PrintArchive.UI
 ```
-
-Press Ctrl+Alt+F12 to open the UI shell.
-
-## Install service (after publishing)
-Run an elevated PowerShell:
-
-```powershell
-sc.exe create PrintArchive binPath= "`"$PWD\publish\PrintArchive.Service.exe`"" start= auto
-sc.exe description PrintArchive "Local print archive background service"
-sc.exe start PrintArchive
-```
-
-Use the supplied installer project/recipe for a real deployment. The Agent should be registered as a per-user logon task, not run in Session 0.
-
-## Archive location
-`%ProgramData%\PrintArchive\Archive`
-
-Restrict ACLs to SYSTEM and Administrators. Configure retention and backups carefully.

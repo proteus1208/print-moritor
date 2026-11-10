@@ -6,4 +6,4 @@ $action = New-ScheduledTaskAction -Execute $AgentExe
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName "PrintArchive Agent" -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
-Write-Host "Agent logon task registered."
+Write-Host "Agent logon task registered. Prefer installer\Setup.ps1 for a full install."
