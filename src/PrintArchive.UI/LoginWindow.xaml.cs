@@ -13,18 +13,26 @@ public partial class LoginWindow : Window
         _enrollMode = !PasswordVault.IsEnrolled;
         if (_enrollMode)
         {
-            Title = "PrintArchive — Create password";
-            Subtitle.Text = "Create a password that protects the archive encryption key. You will need it to view and open archived documents.";
+            Title = "PrintArchive - Create password";
+            Subtitle.Text =
+                "Create a password that protects the archive encryption key. You will need it to view and open archived documents.";
             PasswordLabel.Text = "New password (min 6 characters)";
             ConfirmPanel.Visibility = Visibility.Visible;
             PrimaryButton.Content = "Create & unlock";
+            Height = 520;
         }
+
+        Loaded += (_, _) => PasswordInput.Focus();
     }
 
-    private void Cancel_Click(object sender, RoutedEventArgs e) => Close();
+    private void Cancel_Click(object sender, RoutedEventArgs e)
+    {
+        Application.Current.Shutdown();
+    }
 
     private void Primary_Click(object sender, RoutedEventArgs e)
     {
+        ErrorText.Visibility = Visibility.Collapsed;
         string password = PasswordInput.Password;
         try
         {
@@ -33,14 +41,12 @@ public partial class LoginWindow : Window
             {
                 if (password.Length < 6)
                 {
-                    MessageBox.Show("Password must be at least 6 characters.", "PrintArchive",
-                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                    ShowError("Password must be at least 6 characters.");
                     return;
                 }
                 if (password != ConfirmInput.Password)
                 {
-                    MessageBox.Show("Passwords do not match.", "PrintArchive",
-                        MessageBoxButton.OK, MessageBoxImage.Warning);
+                    ShowError("Passwords do not match.");
                     return;
                 }
 
@@ -52,27 +58,32 @@ public partial class LoginWindow : Window
                 key = PasswordVault.Unlock(password);
             }
 
-            var history = new HistoryWindow(key);
-            history.Show();
+            SessionCache.Save(key);
+            App.OpenHistory(key);
+            // Do not Close() before History is MainWindow — that used to shut the app down.
+            Hide();
             Close();
         }
         catch (UnauthorizedAccessException)
         {
-            MessageBox.Show("Incorrect password.", "PrintArchive",
-                MessageBoxButton.OK, MessageBoxImage.Error);
+            ShowError("Incorrect password.");
             PasswordInput.Clear();
             PasswordInput.Focus();
         }
         catch (Exception ex)
         {
-            MessageBox.Show("Could not unlock archive:\n" + ex.Message, "PrintArchive",
-                MessageBoxButton.OK, MessageBoxImage.Error);
+            ShowError("Could not unlock archive: " + ex.Message);
         }
         finally
         {
-            // PasswordBox keeps its own copy; clear UI fields.
             PasswordInput.Clear();
             ConfirmInput.Clear();
         }
+    }
+
+    private void ShowError(string message)
+    {
+        ErrorText.Text = message;
+        ErrorText.Visibility = Visibility.Visible;
     }
 }

@@ -15,6 +15,7 @@ public partial class HistoryWindow : Window
     private readonly StorageManager _storage;
     private readonly List<string> _openedTempFiles = [];
     private bool _suppressFilter = true;
+    private bool _locking;
 
     public HistoryWindow(byte[] masterKey)
     {
@@ -94,6 +95,16 @@ public partial class HistoryWindow : Window
             Reload();
     }
 
+    private void Lock_Click(object sender, RoutedEventArgs e)
+    {
+        _locking = true;
+        SessionCache.Clear();
+        var login = new LoginWindow();
+        Application.Current.MainWindow = login;
+        login.Show();
+        Close();
+    }
+
     private void JobsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
         UpdateDetails(JobsGrid.SelectedItem as PrintJobRecord);
 
@@ -109,10 +120,10 @@ public partial class HistoryWindow : Window
         DetailTitle.Text = job.DocumentName;
         DetailBody.Text =
             $"Printed {job.Timestamp:yyyy-MM-dd HH:mm:ss} by {job.Username} on {job.PrinterName}\n" +
-            $"Pages: {job.PageCount?.ToString() ?? "—"}    Size: {(job.DataSize is long b ? StorageManager.FormatBytes(b) : "—")}\n" +
+            $"Pages: {job.PageCount?.ToString() ?? "-"}    Size: {(job.DataSize is long b ? StorageManager.FormatBytes(b) : "-")}\n" +
             $"Capture: {job.CaptureStatus}\n" +
-            $"Source: {job.OriginalFilePath ?? "—"}\n" +
-            $"Archive: {job.ArchiveFilePath ?? "—"}";
+            $"Source: {job.OriginalFilePath ?? "-"}\n" +
+            $"Archive: {job.ArchiveFilePath ?? "-"}";
     }
 
     private void JobsGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e) =>
@@ -137,7 +148,6 @@ public partial class HistoryWindow : Window
             string temp = _store.DecryptToTemp(job);
             TempFileManager.Track(temp);
             _openedTempFiles.Add(temp);
-
             Process.Start(new ProcessStartInfo(temp) { UseShellExecute = true });
         }
         catch (Exception ex)
@@ -211,5 +221,8 @@ public partial class HistoryWindow : Window
         TempFileManager.CleanupAllUnlocked();
         _store.Dispose();
         _crypto.Dispose();
+
+        if (!_locking)
+            Application.Current.Shutdown();
     }
 }

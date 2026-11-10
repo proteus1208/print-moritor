@@ -28,11 +28,10 @@ internal sealed class HotkeyContext : ApplicationContext
     private readonly MessageWindow _window;
     private readonly NotifyIcon _tray;
     private readonly System.Windows.Forms.Timer _cleanupTimer;
-    private Process? _uiProcess;
 
     public HotkeyContext()
     {
-        _window = new MessageWindow(LaunchUi);
+        _window = new MessageWindow(LaunchOrFocusUi);
 
         _tray = new NotifyIcon
         {
@@ -41,7 +40,7 @@ internal sealed class HotkeyContext : ApplicationContext
             Icon = SystemIcons.Application,
             ContextMenuStrip = BuildMenu()
         };
-        _tray.DoubleClick += (_, _) => LaunchUi();
+        _tray.DoubleClick += (_, _) => LaunchOrFocusUi();
 
         if (!RegisterHotKey(_window.Handle, HotkeyId, ModControl | ModAlt | ModNoRepeat, VkF12))
             MessageBox.Show("Ctrl+Alt+F12 could not be registered. Another application may be using it.",
@@ -55,7 +54,7 @@ internal sealed class HotkeyContext : ApplicationContext
     private ContextMenuStrip BuildMenu()
     {
         var menu = new ContextMenuStrip();
-        menu.Items.Add("Open PrintArchive", null, (_, _) => LaunchUi());
+        menu.Items.Add("Open PrintArchive", null, (_, _) => LaunchOrFocusUi());
         menu.Items.Add("Cleanup temp files", null, (_, _) =>
         {
             TempFileManager.CleanupAllUnlocked();
@@ -67,8 +66,26 @@ internal sealed class HotkeyContext : ApplicationContext
         return menu;
     }
 
-    private void LaunchUi()
+    private void LaunchOrFocusUi()
     {
+        // If History/Login is already open, bring it forward instead of starting another process.
+        foreach (var process in Process.GetProcessesByName("PrintArchive.UI"))
+        {
+            try
+            {
+                if (process.MainWindowHandle != IntPtr.Zero)
+                {
+                    ShowWindow(process.MainWindowHandle, 9); // SW_RESTORE
+                    SetForegroundWindow(process.MainWindowHandle);
+                    return;
+                }
+            }
+            catch
+            {
+                // fall through to launch
+            }
+        }
+
         string ui = Path.Combine(AppContext.BaseDirectory, "PrintArchive.UI.exe");
         if (!File.Exists(ui))
         {
@@ -78,10 +95,7 @@ internal sealed class HotkeyContext : ApplicationContext
             return;
         }
 
-        if (_uiProcess is { HasExited: false })
-            return;
-
-        _uiProcess = Process.Start(new ProcessStartInfo(ui) { UseShellExecute = true });
+        Process.Start(new ProcessStartInfo(ui) { UseShellExecute = true });
     }
 
     protected override void Dispose(bool disposing)
@@ -122,4 +136,10 @@ internal sealed class HotkeyContext : ApplicationContext
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 }
