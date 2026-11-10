@@ -1,0 +1,24 @@
+<Window x:Class="PrintArchive.UI.HistoryWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="PrintArchive History" Height="620" Width="980"
+        WindowStartupLocation="CenterScreen">
+  <DockPanel Margin="18">
+    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,12">
+      <TextBlock Text="Print history" FontSize="24" FontWeight="SemiBold"
+                 VerticalAlignment="Center"/>
+      <Button Content="Settings" Margin="20,0,0,0"/>
+    </StackPanel>
+    <DataGrid x:Name="JobsGrid" AutoGenerateColumns="False" IsReadOnly="True"
+              SelectionMode="Single" MouseDoubleClick="JobsGrid_MouseDoubleClick">
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="Time" Binding="{Binding Timestamp}" Width="180"/>
+        <DataGridTextColumn Header="Document" Binding="{Binding DocumentName}" Width="*"/>
+        <DataGridTextColumn Header="Printer" Binding="{Binding PrinterName}" Width="220"/>
+        <DataGridTextColumn Header="Status" Binding="{Binding CaptureStatus}" Width="140"/>
+      </DataGrid.Columns>
+    </DataGrid>
+    <TextBlock DockPanel.Dock="Bottom" Margin="0,10,0,0" Foreground="Gray"
+               Text="Double-click to open an archived original when source capture is available."/>
+  </DockPanel>
+</Window>
