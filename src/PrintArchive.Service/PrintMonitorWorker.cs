@@ -242,7 +242,7 @@ public sealed class PrintMonitorWorker : BackgroundService
     private static bool LooksLikePort(string value)
     {
         string v = value.Trim();
-        return v.EndsWith(':', StringComparison.Ordinal) ||
+        return v.EndsWith(":", StringComparison.Ordinal) ||
                v.StartsWith("USB", StringComparison.OrdinalIgnoreCase) ||
                v.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ||
                v.StartsWith("LPT", StringComparison.OrdinalIgnoreCase) ||
