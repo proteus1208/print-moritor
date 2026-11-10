@@ -50,15 +50,28 @@ Write-Step "Creating ProgramData archive directories"
 New-Item -ItemType Directory -Force -Path "$Root\Archive\Jobs", "$Root\Temp", "$Root\Logs" | Out-Null
 
 Write-Step "Configuring ACLs (SYSTEM + Administrators)"
-$acl = Get-Acl $Root
-$acl.SetAccessRuleProtection($true, $false)
-$rules = @(
-    New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM","FullControl","ContainerInherit,ObjectInherit","None","Allow"),
-    New-Object System.Security.AccessControl.FileSystemAccessRule("Administrators","FullControl","ContainerInherit,ObjectInherit","None","Allow"),
-    New-Object System.Security.AccessControl.FileSystemAccessRule("Users","ReadAndExecute","ContainerInherit,ObjectInherit","None","Allow")
-)
-foreach ($rule in $rules) { $acl.AddAccessRule($rule) }
-Set-Acl -Path $Root -AclObject $acl
+try {
+    $acl = Get-Acl $Root
+    $acl.SetAccessRuleProtection($true, $false)
+    $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
+               [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $propagate = [System.Security.AccessControl.PropagationFlags]::None
+    $allow = [System.Security.AccessControl.AccessControlType]::Allow
+
+    $ruleArgs = @(
+        @("SYSTEM", [System.Security.AccessControl.FileSystemRights]::FullControl),
+        @("Administrators", [System.Security.AccessControl.FileSystemRights]::FullControl),
+        @("Users", [System.Security.AccessControl.FileSystemRights]::ReadAndExecute)
+    )
+    foreach ($ra in $ruleArgs) {
+        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $ra[0], $ra[1], $inherit, $propagate, $allow)
+        $acl.AddAccessRule($rule) | Out-Null
+    }
+    Set-Acl -Path $Root -AclObject $acl
+} catch {
+    Write-Host "  ACL configuration skipped: $($_.Exception.Message)" -ForegroundColor Yellow
+}
 
 Write-Step "Stopping existing service / agent before copy"
 sc.exe stop PrintArchive 2>$null | Out-Null
