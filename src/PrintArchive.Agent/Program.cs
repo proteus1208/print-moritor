@@ -9,6 +9,11 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
+        // Single-instance background agent (no tray icon).
+        using var mutex = new Mutex(true, @"Local\PrintArchive.Agent", out bool createdNew);
+        if (!createdNew)
+            return;
+
         ApplicationConfiguration.Initialize();
         ArchivePaths.EnsureCreated();
         TempFileManager.CleanupOrphans(TimeSpan.FromHours(1));
@@ -26,7 +31,6 @@ internal sealed class HotkeyContext : ApplicationContext
     private const uint VkF12 = 0x7B;
 
     private readonly MessageWindow _window;
-    private readonly NotifyIcon _tray;
     private readonly System.Windows.Forms.Timer _cleanupTimer;
     private readonly SessionCaptureWorker _captureWorker;
 
@@ -35,42 +39,16 @@ internal sealed class HotkeyContext : ApplicationContext
         _window = new MessageWindow(LaunchOrFocusUi);
         _captureWorker = new SessionCaptureWorker();
 
-        _tray = new NotifyIcon
-        {
-            Text = "PrintArchive Agent",
-            Visible = true,
-            Icon = SystemIcons.Application,
-            ContextMenuStrip = BuildMenu()
-        };
-        _tray.DoubleClick += (_, _) => LaunchOrFocusUi();
-
-        if (!RegisterHotKey(_window.Handle, HotkeyId, ModControl | ModAlt | ModNoRepeat, VkF12))
-            MessageBox.Show("Ctrl+Alt+F12 could not be registered. Another application may be using it.",
-                "PrintArchive", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        // Silent background: hotkey only, no tray icon / no popups.
+        RegisterHotKey(_window.Handle, HotkeyId, ModControl | ModAlt | ModNoRepeat, VkF12);
 
         _cleanupTimer = new System.Windows.Forms.Timer { Interval = 15 * 60 * 1000 };
         _cleanupTimer.Tick += (_, _) => TempFileManager.CleanupOrphans(TimeSpan.FromHours(1));
         _cleanupTimer.Start();
     }
 
-    private ContextMenuStrip BuildMenu()
-    {
-        var menu = new ContextMenuStrip();
-        menu.Items.Add("Open PrintArchive", null, (_, _) => LaunchOrFocusUi());
-        menu.Items.Add("Cleanup temp files", null, (_, _) =>
-        {
-            TempFileManager.CleanupAllUnlocked();
-            MessageBox.Show("Temporary decrypted files cleaned.", "PrintArchive",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-        });
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Exit", null, (_, _) => ExitThread());
-        return menu;
-    }
-
     private void LaunchOrFocusUi()
     {
-        // If History/Login is already open, bring it forward instead of starting another process.
         foreach (var process in Process.GetProcessesByName("PrintArchive.UI"))
         {
             try
@@ -84,18 +62,13 @@ internal sealed class HotkeyContext : ApplicationContext
             }
             catch
             {
-                // fall through to launch
+                // fall through
             }
         }
 
         string ui = Path.Combine(AppContext.BaseDirectory, "PrintArchive.UI.exe");
         if (!File.Exists(ui))
-        {
-            MessageBox.Show(
-                "PrintArchive.UI.exe was not found next to the Agent.\nPublish Agent and UI into the same folder.",
-                "PrintArchive", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
-        }
 
         Process.Start(new ProcessStartInfo(ui) { UseShellExecute = true });
     }
@@ -109,8 +82,6 @@ internal sealed class HotkeyContext : ApplicationContext
             _captureWorker.Dispose();
             UnregisterHotKey(_window.Handle, HotkeyId);
             _window.DestroyHandle();
-            _tray.Visible = false;
-            _tray.Dispose();
             TempFileManager.CleanupAllUnlocked();
         }
         base.Dispose(disposing);

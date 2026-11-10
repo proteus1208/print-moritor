@@ -60,7 +60,7 @@ public sealed class PrintMonitorWorker : BackgroundService
             if (_watchers.Count == 0)
                 throw new InvalidOperationException("No print-event watchers could be enabled.");
 
-            WriteLog($"SUCCESS: {_watchers.Count} watcher(s) active; recording all printers.");
+            WriteLog($"SUCCESS: {_watchers.Count} watcher(s) active; metadata-first; recording ALL printers.");
             _logger.LogInformation("PrintArchive is monitoring Windows print events.");
         }
         catch (Exception ex)

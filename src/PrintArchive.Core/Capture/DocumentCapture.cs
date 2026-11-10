@@ -4,9 +4,8 @@ using System.Text.RegularExpressions;
 namespace PrintArchive.Core;
 
 /// <summary>
-/// Best-effort original-document correlation. Print events rarely include a full path,
-/// so titles are cleaned (Word / Photoshop / etc.) and matched against Recent files,
-/// common folders, and optional running-app COM hooks when available.
+/// Best-effort original-document correlation. Safe against Windows junction /
+/// access-denied folders (e.g. Documents\My Music).
 /// </summary>
 public static class DocumentCapture
 {
@@ -16,7 +15,30 @@ public static class DocumentCapture
     private static readonly string[] PdfExt = [".pdf"];
     private static readonly string[] AllHintExt = [.. OfficeExt, .. PhotoshopExt, .. ImageExt, .. PdfExt, ".xlsx", ".pptx", ".txt"];
 
+    private static readonly EnumerationOptions SafeEnumOptions = new()
+    {
+        RecurseSubdirectories = true,
+        IgnoreInaccessible = true,
+        ReturnSpecialDirectories = false,
+        // Skip junctions/reparse points like "My Music", "My Pictures".
+        AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System,
+        MaxRecursionDepth = 6
+    };
+
     public static CaptureAttempt TryCapture(string documentName, string? username)
+    {
+        try
+        {
+            return TryCaptureCore(documentName, username);
+        }
+        catch (Exception ex)
+        {
+            // Never let capture failures break print archiving.
+            return CaptureAttempt.MetadataOnly($"Capture error: {ex.GetType().Name}");
+        }
+    }
+
+    private static CaptureAttempt TryCaptureCore(string documentName, string? username)
     {
         if (string.IsNullOrWhiteSpace(documentName))
             return CaptureAttempt.MetadataOnly("Empty document name");
@@ -28,7 +50,6 @@ public static class DocumentCapture
         if (Path.IsPathRooted(cleaned) && File.Exists(cleaned))
             return CaptureAttempt.Original(cleaned);
 
-        // Running-app COM (Word / Photoshop) — works in interactive session; often fails in Session 0.
         string? comPath = TryActiveDocumentFromApps(cleaned);
         if (comPath is not null && File.Exists(comPath))
             return CaptureAttempt.Original(comPath, "Active application document");
@@ -37,11 +58,10 @@ public static class DocumentCapture
         if (string.IsNullOrWhiteSpace(fileName))
             return CaptureAttempt.MetadataOnly("Document title is not a resolvable file name");
 
-        // Invalid path chars except we already cleaned most; scrub leftovers.
         foreach (char c in Path.GetInvalidFileNameChars())
             fileName = fileName.Replace(c, '_');
 
-        var namesToTry = BuildNameVariants(fileName);
+        var namesToTry = BuildNameVariants(fileName).ToList();
         var candidates = new List<string>();
 
         foreach (string name in namesToTry)
@@ -50,10 +70,11 @@ public static class DocumentCapture
             {
                 if (!candidates.Contains(hit, StringComparer.OrdinalIgnoreCase))
                     candidates.Add(hit);
+                if (candidates.Count >= 20) break;
             }
+            if (candidates.Count >= 20) break;
         }
 
-        // Windows Recent (.lnk) — very effective for Word / PSD opened from Explorer.
         foreach (string hit in FindInRecent(namesToTry))
         {
             if (!candidates.Contains(hit, StringComparer.OrdinalIgnoreCase))
@@ -75,12 +96,9 @@ public static class DocumentCapture
     public static string CleanDocumentTitle(string name)
     {
         name = name.Trim().Trim('"');
-
-        // Photoshop: "Poster.psd @ 66.7% (RGB/8)"
         name = Regex.Replace(name, @"\s*@\s*[\d.,]+%\s*(\([^)]*\))?\s*$", "", RegexOptions.IgnoreCase);
         name = Regex.Replace(name, @"\s*\((RGB|CMYK|Lab|Gray)[^)]*\)\s*$", "", RegexOptions.IgnoreCase);
 
-        // "filename.psd - Adobe Photoshop 2024"
         string[] suffixes =
         [
             " - Word", " — Word", " - Microsoft Word",
@@ -99,7 +117,6 @@ public static class DocumentCapture
                 name = name[..^suffix.Length].Trim();
         }
 
-        // Word sometimes uses "Document1 [Compatibility Mode]"
         name = Regex.Replace(name, @"\s*\[Compatibility Mode\]\s*$", "", RegexOptions.IgnoreCase);
         return name.Trim();
     }
@@ -112,22 +129,18 @@ public static class DocumentCapture
 
         if (string.IsNullOrWhiteSpace(ext))
         {
-            // Bare title from Word/Photoshop — probe likely extensions.
-            IEnumerable<string> hints = GuessExtensions(stem);
-            foreach (string e in hints)
+            foreach (string e in GuessExtensions(stem))
                 yield return stem + e;
         }
         else if (OfficeExt.Contains(ext, StringComparer.OrdinalIgnoreCase) ||
                  PhotoshopExt.Contains(ext, StringComparer.OrdinalIgnoreCase))
         {
-            // Also try stem-only recent matches later via names list.
             yield return stem + ext.ToLowerInvariant();
         }
     }
 
     private static IEnumerable<string> GuessExtensions(string stem)
     {
-        // Heuristic from title keywords; otherwise try common set.
         string lower = stem.ToLowerInvariant();
         if (lower.Contains("psd") || lower.Contains("mock") || lower.Contains("design"))
             return PhotoshopExt;
@@ -140,70 +153,85 @@ public static class DocumentCapture
     {
         foreach (string root in GetSearchRoots(username))
         {
-            if (!Directory.Exists(root)) continue;
-            IEnumerable<string> hits;
-            try
-            {
-                hits = Directory.EnumerateFiles(root, fileName, SearchOption.AllDirectories);
-            }
-            catch
-            {
+            if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root))
                 continue;
-            }
 
-            foreach (string hit in hits.Take(12))
-                yield return hit;
+            using var enumerator = SafeEnumerateFiles(root, fileName);
+            if (enumerator is null) continue;
+
+            int count = 0;
+            while (count < 12)
+            {
+                bool moved;
+                try { moved = enumerator.MoveNext(); }
+                catch { break; }
+                if (!moved) break;
+
+                yield return enumerator.Current;
+                count++;
+            }
+        }
+    }
+
+    private static IEnumerator<string>? SafeEnumerateFiles(string root, string fileName)
+    {
+        try
+        {
+            return Directory.EnumerateFiles(root, fileName, SafeEnumOptions).GetEnumerator();
+        }
+        catch
+        {
+            return null;
         }
     }
 
     private static IEnumerable<string> FindInRecent(IEnumerable<string> names)
     {
-        string recent = Environment.GetFolderPath(Environment.SpecialFolder.Recent);
         var nameSet = new HashSet<string>(names, StringComparer.OrdinalIgnoreCase);
-        if (!Directory.Exists(recent)) yield break;
 
-        string[] lnks;
-        try { lnks = Directory.GetFiles(recent, "*.lnk"); }
-        catch { yield break; }
-
-        foreach (string lnk in lnks.OrderByDescending(SafeWriteTime).Take(80))
+        foreach (string recent in GetRecentFolders())
         {
-            string target = ResolveShortcut(lnk);
-            if (string.IsNullOrWhiteSpace(target) || !File.Exists(target)) continue;
-            string targetName = Path.GetFileName(target);
-            string targetStem = Path.GetFileNameWithoutExtension(target);
-            if (nameSet.Contains(targetName) ||
-                nameSet.Contains(targetStem) ||
-                nameSet.Any(n => targetName.Equals(n, StringComparison.OrdinalIgnoreCase) ||
-                                 Path.GetFileNameWithoutExtension(n).Equals(targetStem, StringComparison.OrdinalIgnoreCase)))
+            string[] lnks;
+            try { lnks = Directory.GetFiles(recent, "*.lnk"); }
+            catch { continue; }
+
+            foreach (string lnk in lnks.OrderByDescending(SafeWriteTime).Take(80))
             {
-                yield return target;
+                string target;
+                try { target = ResolveShortcut(lnk); }
+                catch { continue; }
+
+                if (string.IsNullOrWhiteSpace(target) || !File.Exists(target)) continue;
+                string targetName = Path.GetFileName(target);
+                string targetStem = Path.GetFileNameWithoutExtension(target);
+                if (nameSet.Contains(targetName) || nameSet.Contains(targetStem))
+                    yield return target;
             }
         }
+    }
 
-        // Also scan each interactive user's Recent when running as SYSTEM.
-        string usersRoot = Environment.GetEnvironmentVariable("SYSTEMDRIVE") is string drive
+    private static IEnumerable<string> GetRecentFolders()
+    {
+        string recent = Environment.GetFolderPath(Environment.SpecialFolder.Recent);
+        if (Directory.Exists(recent))
+            yield return recent;
+
+        string users = Environment.GetEnvironmentVariable("SYSTEMDRIVE") is string drive
             ? Path.Combine(drive + Path.DirectorySeparatorChar, "Users")
             : @"C:\Users";
-        if (!Directory.Exists(usersRoot)) yield break;
-        foreach (string profile in Directory.EnumerateDirectories(usersRoot))
+        if (!Directory.Exists(users)) yield break;
+
+        IEnumerable<string> profiles;
+        try { profiles = Directory.EnumerateDirectories(users); }
+        catch { yield break; }
+
+        foreach (string profile in profiles)
         {
             string leaf = Path.GetFileName(profile);
             if (leaf is "Public" or "Default" or "Default User" or "All Users") continue;
             string userRecent = Path.Combine(profile, "AppData", "Roaming", "Microsoft", "Windows", "Recent");
-            if (!Directory.Exists(userRecent)) continue;
-            string[] userLnks;
-            try { userLnks = Directory.GetFiles(userRecent, "*.lnk"); }
-            catch { continue; }
-            foreach (string lnk in userLnks.OrderByDescending(SafeWriteTime).Take(40))
-            {
-                string target = ResolveShortcut(lnk);
-                if (string.IsNullOrWhiteSpace(target) || !File.Exists(target)) continue;
-                string targetName = Path.GetFileName(target);
-                if (nameSet.Contains(targetName) ||
-                    nameSet.Contains(Path.GetFileNameWithoutExtension(target)))
-                    yield return target;
-            }
+            if (Directory.Exists(userRecent))
+                yield return userRecent;
         }
     }
 
@@ -232,7 +260,6 @@ public static class DocumentCapture
         if (word is not null)
         {
             if (TitleMatches(cleanedTitle, word)) return word;
-            // If Word is the only open doc and title looks generic/DocumentN, still accept.
             if (IsGenericWordTitle(cleanedTitle)) return word;
         }
 
@@ -240,7 +267,7 @@ public static class DocumentCapture
         if (ps is not null && TitleMatches(cleanedTitle, ps))
             return ps;
 
-        return word ?? ps;
+        return null;
     }
 
     private static bool IsGenericWordTitle(string title)
@@ -254,9 +281,8 @@ public static class DocumentCapture
         string t = Path.GetFileName(title);
         string p = Path.GetFileName(path);
         if (t.Equals(p, StringComparison.OrdinalIgnoreCase)) return true;
-        string ts = Path.GetFileNameWithoutExtension(t);
-        string ps = Path.GetFileNameWithoutExtension(p);
-        return ts.Equals(ps, StringComparison.OrdinalIgnoreCase);
+        return Path.GetFileNameWithoutExtension(t)
+            .Equals(Path.GetFileNameWithoutExtension(p), StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? TryWordActiveDocument()
@@ -298,35 +324,34 @@ public static class DocumentCapture
 
     private static IEnumerable<string> GetSearchRoots(string? username)
     {
+        // Prefer shallow, real folders — avoid shell namespace junctions under Documents.
         string[] local =
         [
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-            Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
             Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "OneDrive"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "OneDrive", "Documents"),
         ];
-        foreach (string root in local)
-            if (!string.IsNullOrWhiteSpace(root))
+        foreach (string root in local.Distinct(StringComparer.OrdinalIgnoreCase))
+            if (!string.IsNullOrWhiteSpace(root) && Directory.Exists(root))
                 yield return root;
 
-        if (!string.IsNullOrWhiteSpace(username))
+        if (string.IsNullOrWhiteSpace(username)) yield break;
+
+        string shortName = username.Contains('\\') ? username.Split('\\').Last() : username;
+        string users = Environment.GetEnvironmentVariable("SYSTEMDRIVE") is string drive
+            ? Path.Combine(drive + Path.DirectorySeparatorChar, "Users")
+            : @"C:\Users";
+        string profile = Path.Combine(users, shortName);
+        if (!Directory.Exists(profile)) yield break;
+
+        foreach (string sub in new[] { "Documents", "Desktop", "Downloads", "Pictures", "OneDrive" })
         {
-            string shortName = username.Contains('\\') ? username.Split('\\').Last() : username;
-            string users = Environment.GetEnvironmentVariable("SYSTEMDRIVE") is string drive
-                ? Path.Combine(drive + Path.DirectorySeparatorChar, "Users")
-                : @"C:\Users";
-            string profile = Path.Combine(users, shortName);
-            if (Directory.Exists(profile))
-            {
-                yield return Path.Combine(profile, "Documents");
-                yield return Path.Combine(profile, "Desktop");
-                yield return Path.Combine(profile, "Downloads");
-                yield return Path.Combine(profile, "Pictures");
-                yield return Path.Combine(profile, "OneDrive");
-                yield return Path.Combine(profile, "OneDrive", "Documents");
-            }
+            string path = Path.Combine(profile, sub);
+            if (Directory.Exists(path))
+                yield return path;
         }
     }
 

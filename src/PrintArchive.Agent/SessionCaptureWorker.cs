@@ -87,10 +87,10 @@ internal sealed class SessionCaptureWorker : IDisposable
 
             if (string.IsNullOrWhiteSpace(job.ArchiveFilePath))
             {
-                var capture = DocumentCapture.TryCapture(job.DocumentName, job.Username);
-                if (capture.Result == CaptureResult.OriginalCaptured && capture.Path is not null)
+                try
                 {
-                    try
+                    var capture = DocumentCapture.TryCapture(job.DocumentName, job.Username);
+                    if (capture.Result == CaptureResult.OriginalCaptured && capture.Path is not null)
                     {
                         storage.EnforceQuota(new FileInfo(capture.Path).Length);
                         job.OriginalFilePath = capture.Path;
@@ -99,10 +99,10 @@ internal sealed class SessionCaptureWorker : IDisposable
                         gotOriginal = true;
                         changed = true;
                     }
-                    catch
-                    {
-                        // keep metadata-only
-                    }
+                }
+                catch
+                {
+                    // keep metadata-only — never fail the whole enrichment pass
                 }
             }
 
