@@ -123,7 +123,8 @@ public partial class HistoryWindow : Window
             $"Pages: {job.PageCount?.ToString() ?? "-"}    Size: {(job.DataSize is long b ? StorageManager.FormatBytes(b) : "-")}\n" +
             $"Capture: {job.CaptureStatus}\n" +
             $"Source: {job.OriginalFilePath ?? "-"}\n" +
-            $"Archive: {job.ArchiveFilePath ?? "-"}";
+            $"Archive: {job.ArchiveFilePath ?? "-"}\n" +
+            $"Screenshot: {job.ScreenshotPath ?? "-"}";
     }
 
     private void JobsGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e) =>

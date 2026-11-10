@@ -137,6 +137,7 @@ public sealed class PrintMonitorWorker : BackgroundService
             };
 
             _store.Add(job);
+            ArchivePaths.SignalPendingJob(job.Id);
             WriteLog($"ARCHIVED: RecordID={record.RecordId}, Job={job.JobId}, " +
                      $"Document={job.DocumentName}, Printer={job.PrinterName}, " +
                      $"Pages={job.PageCount}, Bytes={job.DataSize}, Status={job.CaptureStatus}");

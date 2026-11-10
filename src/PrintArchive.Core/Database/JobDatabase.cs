@@ -182,6 +182,31 @@ public sealed class JobDatabase : IDisposable
         }
     }
 
+    /// <summary>
+    /// Jobs that still need a screenshot and/or original-file enrichment from the Agent.
+    /// </summary>
+    public List<PrintJobRecord> QueryNeedingEnrichment(int limit = 25)
+    {
+        lock (_sync)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT * FROM Jobs
+                WHERE ScreenshotPath IS NULL
+                   OR ArchiveFilePath IS NULL
+                ORDER BY Timestamp DESC
+                LIMIT $limit
+                """;
+            cmd.Parameters.AddWithValue("$limit", limit);
+            var list = new List<PrintJobRecord>();
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+                list.Add(Read(reader));
+            return list;
+        }
+    }
+
+
     public void Delete(string id)
     {
         lock (_sync)

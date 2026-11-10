@@ -65,6 +65,16 @@ public sealed class ArchiveStore : IDisposable
         return dest;
     }
 
+    public string ArchiveScreenshotFile(string jobId, string pngPath)
+    {
+        string dest = Path.Combine(ArchivePaths.Jobs, jobId, "screenshot.png.enc");
+        _crypto.EncryptFile(pngPath, dest);
+        return dest;
+    }
+
+    public void Update(PrintJobRecord record) => _db.Upsert(record);
+
+
     public string DecryptToTemp(PrintJobRecord job)
     {
         if (string.IsNullOrWhiteSpace(job.ArchiveFilePath) || !File.Exists(job.ArchiveFilePath))

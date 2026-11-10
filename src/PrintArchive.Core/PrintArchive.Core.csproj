@@ -8,6 +8,7 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
     <!-- Pin 3.x bundle to clear NU1903 / GHSA-2m69-gcr7-jv3q from transitive 2.1.11 lib.e_sqlite3 -->
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.0" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
   </ItemGroup>
 </Project>

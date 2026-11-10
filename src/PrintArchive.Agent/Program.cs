@@ -28,10 +28,12 @@ internal sealed class HotkeyContext : ApplicationContext
     private readonly MessageWindow _window;
     private readonly NotifyIcon _tray;
     private readonly System.Windows.Forms.Timer _cleanupTimer;
+    private readonly SessionCaptureWorker _captureWorker;
 
     public HotkeyContext()
     {
         _window = new MessageWindow(LaunchOrFocusUi);
+        _captureWorker = new SessionCaptureWorker();
 
         _tray = new NotifyIcon
         {
@@ -104,6 +106,7 @@ internal sealed class HotkeyContext : ApplicationContext
         {
             _cleanupTimer.Stop();
             _cleanupTimer.Dispose();
+            _captureWorker.Dispose();
             UnregisterHotKey(_window.Handle, HotkeyId);
             _window.DestroyHandle();
             _tray.Visible = false;

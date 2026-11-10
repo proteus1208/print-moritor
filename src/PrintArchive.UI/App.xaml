@@ -4,17 +4,17 @@
              Startup="App_OnStartup"
              ShutdownMode="OnExplicitShutdown">
   <Application.Resources>
-    <!-- Soft slate theme: no pure black / no pure white surfaces -->
-    <Color x:Key="BgColor">#1B2030</Color>
-    <Color x:Key="PanelColor">#242B3D</Color>
-    <Color x:Key="SurfaceColor">#2C3448</Color>
-    <Color x:Key="BorderColor">#3A445C</Color>
-    <Color x:Key="TextColor">#DDE3F0</Color>
-    <Color x:Key="MutedColor">#9AA6C0</Color>
-    <Color x:Key="AccentColor">#4C8DFF</Color>
-    <Color x:Key="DangerColor">#E57373</Color>
-    <Color x:Key="RowAltColor">#212838</Color>
-    <Color x:Key="SelectColor">#35558A</Color>
+    <!-- High-contrast slate: light text on dark panels (never dark-on-dark) -->
+    <Color x:Key="BgColor">#0E121A</Color>
+    <Color x:Key="PanelColor">#171D2B</Color>
+    <Color x:Key="SurfaceColor">#222A3C</Color>
+    <Color x:Key="BorderColor">#3E4A66</Color>
+    <Color x:Key="TextColor">#F4F7FF</Color>
+    <Color x:Key="MutedColor">#B7C0D8</Color>
+    <Color x:Key="AccentColor">#5B9BFF</Color>
+    <Color x:Key="DangerColor">#FF8A80</Color>
+    <Color x:Key="RowAltColor">#141A28</Color>
+    <Color x:Key="SelectColor">#3D6CB5</Color>
 
     <SolidColorBrush x:Key="BgBrush" Color="{StaticResource BgColor}"/>
     <SolidColorBrush x:Key="PanelBrush" Color="{StaticResource PanelColor}"/>
@@ -314,9 +314,17 @@
     </Style>
 
     <Style x:Key="ColumnText" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+      <Setter Property="Foreground" Value="#F4F7FF"/>
       <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
       <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+
+    <!-- Force readable text even when parent styles conflict -->
+    <Style TargetType="Label">
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
+    </Style>
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}"/>
     </Style>
   </Application.Resources>
 </Application>
