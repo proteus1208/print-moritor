@@ -1,10 +1,24 @@
-1. On Windows, open PowerShell in this folder:
+ONE-CLICK INSTALLER (recommended for end users)
+-----------------------------------------------
+1. Install Inno Setup 6 once on the BUILD PC:
+     https://jrsoftware.org/isdl.php
 
-   powershell -ExecutionPolicy Bypass -File .\Build.ps1
+2. Double-click:
+     MakeInstaller.cmd
 
-2. Install (elevated PowerShell):
+   Or run:
+     powershell -ExecutionPolicy Bypass -File .\BuildInstaller.ps1
 
-   powershell -ExecutionPolicy Bypass -File .\installer\Setup.ps1
+3. Result:
+     dist\PrintArchive-Setup.exe
 
-3. Create your password when the UI opens.
-4. Print something, then press Ctrl+Alt+F12 to open History.
+4. On the target PC: double-click PrintArchive-Setup.exe, accept UAC.
+   It installs the service, agent, and opens the password UI.
+
+
+DEV INSTALL (no Setup.exe)
+--------------------------
+  powershell -ExecutionPolicy Bypass -File .\Build.ps1
+  powershell -ExecutionPolicy Bypass -File .\installer\Setup.ps1
+
+Hotkey after install: Ctrl+Alt+F12

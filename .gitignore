@@ -1,5 +1,6 @@
 Release/
 publish/
+dist/
 obj/
 bin/
 **/bin/
