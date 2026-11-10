@@ -1,3 +1,9 @@
-Release
-publish
+Release/
+publish/
+obj/
+bin/
+**/bin/
+**/obj/
+*.user
+*.old
 dummy

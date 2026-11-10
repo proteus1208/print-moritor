@@ -13,7 +13,7 @@ $ErrorActionPreference = "Stop"
 $Root = "C:\ProgramData\PrintArchive"
 $InstallDir = Join-Path ${env:ProgramFiles} "PrintArchive"
 
-function Write-Step($msg) { Write-Host "→ $msg" -ForegroundColor Cyan }
+function Write-Step($msg) { Write-Host "-> $msg" -ForegroundColor Cyan }
 
 if ($Uninstall) {
     Write-Step "Stopping and removing service"
@@ -23,6 +23,9 @@ if ($Uninstall) {
 
     Write-Step "Removing Agent logon task"
     Unregister-ScheduledTask -TaskName "PrintArchive Agent" -Confirm:$false -ErrorAction SilentlyContinue
+
+    Get-Process -Name "PrintArchive.Agent","PrintArchive.UI" -ErrorAction SilentlyContinue |
+        ForEach-Object { try { $_.Kill() } catch { } }
 
     Write-Step "Removing install directory"
     if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force }
@@ -38,7 +41,9 @@ $required = @(
 )
 foreach ($name in $required) {
     $path = Join-Path $PublishDir $name
-    if (-not (Test-Path $path)) { throw "Missing $path — run Build.ps1 first." }
+    if (-not (Test-Path $path)) {
+        throw "Missing $path - run Build.ps1 first."
+    }
 }
 
 Write-Step "Creating ProgramData archive directories"
@@ -54,6 +59,12 @@ $rules = @(
 )
 foreach ($rule in $rules) { $acl.AddAccessRule($rule) }
 Set-Acl -Path $Root -AclObject $acl
+
+Write-Step "Stopping existing service / agent before copy"
+sc.exe stop PrintArchive 2>$null | Out-Null
+Start-Sleep -Seconds 2
+Get-Process -Name "PrintArchive.Service","PrintArchive.Agent","PrintArchive.UI" -ErrorAction SilentlyContinue |
+    ForEach-Object { try { $_.Kill() } catch { } }
 
 Write-Step "Copying binaries to $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -83,7 +94,7 @@ Write-Step "Enabling PrintService Operational log (best effort)"
 try {
     wevtutil.exe sl "Microsoft-Windows-PrintService/Operational" /e:true | Out-Null
 } catch {
-    Write-Host "  Could not enable PrintService log automatically — enable it in Event Viewer." -ForegroundColor Yellow
+    Write-Host "  Could not enable PrintService log automatically - enable it in Event Viewer." -ForegroundColor Yellow
 }
 
 if (-not $SkipPasswordPrompt) {
