@@ -106,7 +106,8 @@ public static class DocumentCapture
             " - PowerPoint", " - Microsoft PowerPoint",
             " - Adobe Acrobat", " - Adobe Acrobat Reader", " - Adobe Reader",
             " - Adobe Photoshop", " - Photoshop", " - Photoshop.exe",
-            " - Paint", " - Paint 3D", " - Notepad",
+            " - Paint", " - Paint 3D",
+            " - Notepad", " — Notepad", " - Windows Notepad",
             " - Microsoft Edge", " - Google Chrome", " - Firefox",
             " - Foxit PDF Reader", " - Foxit Reader",
             " - Photos", " - Windows Photo Viewer"

@@ -3,6 +3,8 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media.Imaging;
 using Microsoft.Win32;
 using PrintArchive.Core;
 
@@ -17,6 +19,7 @@ public partial class HistoryWindow : Window
     private bool _suppressFilter = true;
     private bool _locking;
     private List<PrintJobRecord> _dayJobs = [];
+    private BitmapImage? _currentShot;
 
     public HistoryWindow(byte[] masterKey)
     {
@@ -29,7 +32,8 @@ public partial class HistoryWindow : Window
         Timeline.JobClicked += job =>
         {
             JobsGrid.SelectedItem = _dayJobs.FirstOrDefault(j => j.Id == job.Id) ?? job;
-            JobsGrid.ScrollIntoView(JobsGrid.SelectedItem);
+            if (JobsGrid.SelectedItem is not null)
+                JobsGrid.ScrollIntoView(JobsGrid.SelectedItem);
         };
 
         PrinterFilter.Items.Clear();
@@ -73,7 +77,6 @@ public partial class HistoryWindow : Window
 
     private static void ApplyRepeatCounts(List<PrintJobRecord> jobs)
     {
-        // Repeats = how many times the same document was printed this day (case-insensitive).
         var groups = jobs
             .GroupBy(j => NormalizeDoc(j.DocumentName), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.OrderBy(x => x.Timestamp).ToList(), StringComparer.OrdinalIgnoreCase);
@@ -176,39 +179,105 @@ public partial class HistoryWindow : Window
 
     private void UpdateDetails(PrintJobRecord? job)
     {
+        ClearScreenshotPreview();
         if (job is null)
         {
             DetailTitle.Text = "Select a print job";
-            DetailBody.Text = "Use the day timeline or table. Green = success, amber = canceled, red = failed.";
+            DetailBody.Text = "Double-click to open the archived original. Click the screenshot to view fullscreen.";
             return;
         }
 
+        // Re-read latest enrichment from DB (Agent may have filled Archive/Screenshot).
+        job = _store.Get(job.Id) ?? job;
+
         DetailTitle.Text = job.DocumentName;
+        bool hasOriginal = !string.IsNullOrWhiteSpace(job.ArchiveFilePath) && File.Exists(job.ArchiveFilePath);
         DetailBody.Text =
             $"{job.PrintOutcome} at {job.Timestamp:yyyy-MM-dd HH:mm:ss} by {job.Username} on {job.PrinterName}\n" +
             $"Duration: {job.DurationLabel}    Pages: {job.PageCount?.ToString() ?? "-"}    " +
             $"Size: {(job.DataSize is long b ? StorageManager.FormatBytes(b) : "-")}\n" +
-            $"Repeats today: {job.RepeatLabel} (same document printed {job.RepeatCount} time(s))\n" +
+            $"Repeats today: {job.RepeatLabel}\n" +
             $"Capture: {job.CaptureStatus}\n" +
-            $"Source: {job.OriginalFilePath ?? "-"}\n" +
-            $"Screenshot: {job.ScreenshotPath ?? "-"}";
+            $"Original archived: {(hasOriginal ? "Yes" : "No")}    Source: {job.OriginalFilePath ?? "-"}\n" +
+            (hasOriginal
+                ? "Double-click the row (or Open) to decrypt and open the original."
+                : "Waiting for Agent capture, or source file was not found.");
+
+        LoadScreenshotPreview(job);
     }
 
-    private void JobsGrid_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e) =>
+    private void LoadScreenshotPreview(PrintJobRecord job)
+    {
+        try
+        {
+            byte[]? png = _store.DecryptBytes(job.ScreenshotPath);
+            if (png is null || png.Length == 0)
+            {
+                ScreenshotPlaceholder.Visibility = Visibility.Visible;
+                ScreenshotPlaceholder.Text = "No screenshot";
+                return;
+            }
+
+            using var ms = new MemoryStream(png);
+            var bmp = new BitmapImage();
+            bmp.BeginInit();
+            bmp.CacheOption = BitmapCacheOption.OnLoad;
+            bmp.StreamSource = ms;
+            bmp.EndInit();
+            bmp.Freeze();
+            _currentShot = bmp;
+            ScreenshotPreview.Source = bmp;
+            ScreenshotPlaceholder.Visibility = Visibility.Collapsed;
+        }
+        catch
+        {
+            ScreenshotPlaceholder.Visibility = Visibility.Visible;
+            ScreenshotPlaceholder.Text = "Screenshot unavailable";
+        }
+    }
+
+    private void ClearScreenshotPreview()
+    {
+        ScreenshotPreview.Source = null;
+        FullscreenImage.Source = null;
+        _currentShot = null;
+        ScreenshotPlaceholder.Visibility = Visibility.Visible;
+        ScreenshotPlaceholder.Text = "No screenshot";
+        FullscreenOverlay.Visibility = Visibility.Collapsed;
+    }
+
+    private void ScreenshotPreview_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (_currentShot is null) return;
+        FullscreenImage.Source = _currentShot;
+        FullscreenOverlay.Visibility = Visibility.Visible;
+        e.Handled = true;
+    }
+
+    private void FullscreenOverlay_Click(object sender, MouseButtonEventArgs e)
+    {
+        FullscreenOverlay.Visibility = Visibility.Collapsed;
+        e.Handled = true;
+    }
+
+    private void JobsGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e) =>
         OpenSelected();
 
     private void Open_Click(object sender, RoutedEventArgs e) => OpenSelected();
 
     private void OpenSelected()
     {
-        if (JobsGrid.SelectedItem is not PrintJobRecord job) return;
+        if (JobsGrid.SelectedItem is not PrintJobRecord selected) return;
+        var job = _store.Get(selected.Id) ?? selected;
+
         try
         {
             if (string.IsNullOrWhiteSpace(job.ArchiveFilePath) || !File.Exists(job.ArchiveFilePath))
             {
                 MessageBox.Show(
-                    "No encrypted document is archived for this job.\n\n" +
-                    "Originals are archived for successful prints when the source path can be resolved.",
+                    "No archived original file for this job yet.\n\n" +
+                    "Leave Notepad/Word open when printing so the Agent can capture the file " +
+                    "(or dump unsaved Notepad text). Then press Refresh.",
                     "PrintArchive", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
@@ -227,7 +296,9 @@ public partial class HistoryWindow : Window
 
     private void Export_Click(object sender, RoutedEventArgs e)
     {
-        if (JobsGrid.SelectedItem is not PrintJobRecord job) return;
+        if (JobsGrid.SelectedItem is not PrintJobRecord selected) return;
+        var job = _store.Get(selected.Id) ?? selected;
+
         if (string.IsNullOrWhiteSpace(job.ArchiveFilePath) || !File.Exists(job.ArchiveFilePath))
         {
             MessageBox.Show("No archived document to export for this job.",
@@ -238,6 +309,8 @@ public partial class HistoryWindow : Window
         string suggested = Path.GetFileName(job.OriginalFilePath ?? job.DocumentName);
         foreach (char c in Path.GetInvalidFileNameChars())
             suggested = suggested.Replace(c, '_');
+        if (string.IsNullOrWhiteSpace(Path.GetExtension(suggested)))
+            suggested += ".txt";
 
         var dialog = new SaveFileDialog
         {

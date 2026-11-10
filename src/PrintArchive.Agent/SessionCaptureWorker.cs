@@ -3,8 +3,7 @@ using PrintArchive.Core;
 namespace PrintArchive.Agent;
 
 /// <summary>
-/// Runs in the interactive user session: captures screenshots and retries Word/PSD
-/// original-file resolution (COM works here; usually fails inside the Session 0 service).
+/// Interactive-session enrichment: screenshot + original (Word/PSD/Notepad/path search).
 /// </summary>
 internal sealed class SessionCaptureWorker : IDisposable
 {
@@ -16,7 +15,7 @@ internal sealed class SessionCaptureWorker : IDisposable
     public SessionCaptureWorker()
     {
         ArchivePaths.EnsureCreated();
-        _timer = new System.Windows.Forms.Timer { Interval = 2000 };
+        _timer = new System.Windows.Forms.Timer { Interval = 1000 };
         _timer.Tick += (_, _) => Tick();
         _timer.Start();
 
@@ -62,7 +61,6 @@ internal sealed class SessionCaptureWorker : IDisposable
                           DateTimeOffset.Now - j.Timestamp < TimeSpan.FromMinutes(45))))
         {
             bool changed = false;
-            bool gotScreenshot = false;
             bool gotOriginal = false;
 
             if (string.IsNullOrWhiteSpace(job.ScreenshotPath) || !File.Exists(job.ScreenshotPath))
@@ -71,12 +69,11 @@ internal sealed class SessionCaptureWorker : IDisposable
                 {
                     string jobDir = Path.Combine(ArchivePaths.Jobs, job.Id);
                     Directory.CreateDirectory(jobDir);
-                    string png = Path.Combine(jobDir, "screenshot-raw.png");
+                    string png = Path.Combine(ArchivePaths.Temp, $"shot-{job.Id}.png");
                     ScreenshotCapture.CaptureToFile(png);
                     storage.EnforceQuota(new FileInfo(png).Length);
                     job.ScreenshotPath = store.ArchiveScreenshotFile(job.Id, png);
                     try { File.Delete(png); } catch { /* ignore */ }
-                    gotScreenshot = true;
                     changed = true;
                 }
                 catch
@@ -85,24 +82,32 @@ internal sealed class SessionCaptureWorker : IDisposable
                 }
             }
 
-            if (string.IsNullOrWhiteSpace(job.ArchiveFilePath))
+            bool allowOriginal = string.IsNullOrWhiteSpace(job.PrintOutcome) ||
+                                 job.PrintOutcome == PrintOutcomes.Success;
+            if (string.IsNullOrWhiteSpace(job.ArchiveFilePath) && allowOriginal)
             {
                 try
                 {
-                    var capture = DocumentCapture.TryCapture(job.DocumentName, job.Username);
-                    if (capture.Result == CaptureResult.OriginalCaptured && capture.Path is not null)
+                    var capture = ResolveOriginal(job.DocumentName, job.Username);
+                    if (capture.Result == CaptureResult.OriginalCaptured && capture.Path is not null &&
+                        File.Exists(capture.Path))
                     {
                         storage.EnforceQuota(new FileInfo(capture.Path).Length);
-                        job.OriginalFilePath = capture.Path;
+                        bool isTempDump = capture.Path.StartsWith(ArchivePaths.Temp, StringComparison.OrdinalIgnoreCase);
+                        job.OriginalFilePath = isTempDump ? Path.GetFileName(capture.Path) : capture.Path;
                         job.ArchiveFilePath = store.ArchiveOriginalFile(job.Id, capture.Path);
                         job.CaptureStatus = capture.StatusText;
                         gotOriginal = true;
                         changed = true;
+                        if (isTempDump)
+                        {
+                            try { File.Delete(capture.Path); } catch { /* ignore */ }
+                        }
                     }
                 }
                 catch
                 {
-                    // keep metadata-only — never fail the whole enrichment pass
+                    // keep metadata-only
                 }
             }
 
@@ -112,7 +117,9 @@ internal sealed class SessionCaptureWorker : IDisposable
                 bool hasShot = !string.IsNullOrWhiteSpace(job.ScreenshotPath);
                 job.CaptureStatus = (hasOriginal, hasShot) switch
                 {
-                    (true, true) => gotOriginal ? "OriginalCaptured + Screenshot" : "OriginalCaptured + Screenshot",
+                    (true, true) => gotOriginal || hasOriginal
+                        ? "OriginalCaptured + Screenshot"
+                        : "OriginalCaptured + Screenshot",
                     (true, false) => "OriginalCaptured",
                     (false, true) => "MetadataOnly + Screenshot",
                     _ => job.CaptureStatus
@@ -128,6 +135,27 @@ internal sealed class SessionCaptureWorker : IDisposable
             }
             catch { /* ignore */ }
         }
+    }
+
+    private static CaptureAttempt ResolveOriginal(string documentName, string? username)
+    {
+        // 1) Notepad first (saved path or live text dump).
+        string lower = documentName.ToLowerInvariant();
+        if (lower.Contains("notepad") || lower.EndsWith(".txt") ||
+            lower.StartsWith("untitled") || !documentName.Contains('.'))
+        {
+            var notepad = NotepadCapture.TryCapture(documentName);
+            if (notepad.Result == CaptureResult.OriginalCaptured)
+                return notepad;
+        }
+
+        // 2) General resolver (Word/PSD/Recent/path search).
+        var general = DocumentCapture.TryCapture(documentName, username);
+        if (general.Result == CaptureResult.OriginalCaptured)
+            return general;
+
+        // 3) Last chance: Notepad anyway.
+        return NotepadCapture.TryCapture(documentName);
     }
 
     public void Dispose()

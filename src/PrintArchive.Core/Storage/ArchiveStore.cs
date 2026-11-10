@@ -1,10 +1,11 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace PrintArchive.Core;
 
 /// <summary>
-/// Primary archive facade: SQLite metadata + encrypted document files.
-/// Migrates legacy jobs.index.enc on first open when present.
+/// Primary archive facade: SQLite metadata + encrypted document files (hashed names).
 /// </summary>
 public sealed class ArchiveStore : IDisposable
 {
@@ -60,20 +61,20 @@ public sealed class ArchiveStore : IDisposable
     {
         if (!File.Exists(sourcePath)) return null;
         string ext = Path.GetExtension(sourcePath);
-        string dest = Path.Combine(ArchivePaths.Jobs, jobId, "original" + ext + ".enc");
+        if (string.IsNullOrWhiteSpace(ext)) ext = ".bin";
+        string dest = Path.Combine(ArchivePaths.Jobs, jobId, HashedFileName(jobId, "orig", ext));
         _crypto.EncryptFile(sourcePath, dest);
         return dest;
     }
 
     public string ArchiveScreenshotFile(string jobId, string pngPath)
     {
-        string dest = Path.Combine(ArchivePaths.Jobs, jobId, "screenshot.png.enc");
+        string dest = Path.Combine(ArchivePaths.Jobs, jobId, HashedFileName(jobId, "shot", ".png"));
         _crypto.EncryptFile(pngPath, dest);
         return dest;
     }
 
     public void Update(PrintJobRecord record) => _db.Upsert(record);
-
 
     public string DecryptToTemp(PrintJobRecord job)
     {
@@ -83,19 +84,24 @@ public sealed class ArchiveStore : IDisposable
         string session = Path.Combine(ArchivePaths.Temp, Environment.ProcessId.ToString(), job.Id);
         Directory.CreateDirectory(session);
 
-        string name = Path.GetFileName(job.ArchiveFilePath);
-        if (name.EndsWith(".enc", StringComparison.OrdinalIgnoreCase))
-            name = name[..^4];
-        if (name.StartsWith("original", StringComparison.OrdinalIgnoreCase) &&
-            !string.IsNullOrWhiteSpace(job.OriginalFilePath))
-            name = Path.GetFileName(job.OriginalFilePath);
-        else if (string.IsNullOrWhiteSpace(Path.GetExtension(name)))
-            name = SanitizeFileName(job.DocumentName);
+        // Friendly name for opening in the associated app (not the hashed archive name).
+        string name = !string.IsNullOrWhiteSpace(job.OriginalFilePath)
+            ? Path.GetFileName(job.OriginalFilePath)
+            : SanitizeFileName(DocumentCapture.CleanDocumentTitle(job.DocumentName));
+        if (string.IsNullOrWhiteSpace(Path.GetExtension(name)))
+            name += GuessExtension(job);
 
         string dest = Path.Combine(session, name);
         _crypto.DecryptFile(job.ArchiveFilePath, dest);
         File.SetAttributes(dest, FileAttributes.Temporary);
         return dest;
+    }
+
+    public byte[]? DecryptBytes(string? encryptedPath)
+    {
+        if (string.IsNullOrWhiteSpace(encryptedPath) || !File.Exists(encryptedPath))
+            return null;
+        return _crypto.Decrypt(File.ReadAllBytes(encryptedPath));
     }
 
     public void Export(PrintJobRecord job, string destinationPath)
@@ -104,6 +110,25 @@ public sealed class ArchiveStore : IDisposable
             throw new FileNotFoundException("No archived document is available for this job.");
         Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
         _crypto.DecryptFile(job.ArchiveFilePath, destinationPath);
+    }
+
+    private static string HashedFileName(string jobId, string kind, string ext)
+    {
+        string payload = $"{jobId}|{kind}|{Guid.NewGuid():N}|{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(payload));
+        string hex = Convert.ToHexString(hash).ToLowerInvariant()[..40];
+        if (!ext.StartsWith('.')) ext = "." + ext;
+        return hex + ext + ".enc";
+    }
+
+    private static string GuessExtension(PrintJobRecord job)
+    {
+        string doc = job.DocumentName.ToLowerInvariant();
+        if (doc.Contains(".txt") || doc.Contains("notepad")) return ".txt";
+        if (doc.Contains(".pdf")) return ".pdf";
+        if (doc.Contains(".docx")) return ".docx";
+        if (doc.Contains(".psd")) return ".psd";
+        return ".bin";
     }
 
     private void TryMigrateLegacyIndex()
@@ -143,7 +168,7 @@ public sealed class ArchiveStore : IDisposable
         }
         catch
         {
-            // Leave legacy file in place if migration fails; service can retry later.
+            // Leave legacy file in place if migration fails.
         }
     }
 
