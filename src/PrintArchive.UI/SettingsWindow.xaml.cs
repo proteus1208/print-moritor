@@ -14,6 +14,7 @@ public partial class SettingsWindow : Window
         _storage = storage;
         var settings = SettingsStore.Load();
         QuotaBox.Text = (settings.MaxBytes / (1024d * 1024d * 1024d)).ToString("0.##", CultureInfo.InvariantCulture);
+        WaitBox.Text = settings.OutcomeWaitSeconds.ToString(CultureInfo.InvariantCulture);
         UsageLabel.Text = "Used " + _storage.FormatUsage();
     }
 
@@ -69,9 +70,18 @@ public partial class SettingsWindow : Window
             }
         }
 
+        if (!int.TryParse(WaitBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int waitSec) ||
+            waitSec < 15 || waitSec > 600)
+        {
+            MessageBox.Show("Outcome wait must be between 15 and 600 seconds.", "PrintArchive",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
         long maxBytes = (long)(gb * 1024 * 1024 * 1024);
         var settings = SettingsStore.Load();
         settings.MaxBytes = maxBytes;
+        settings.OutcomeWaitSeconds = waitSec;
         SettingsStore.Save(settings);
         _storage.QuotaBytes = maxBytes;
         _storage.EnforceQuota();

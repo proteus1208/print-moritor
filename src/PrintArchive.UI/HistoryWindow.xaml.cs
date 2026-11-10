@@ -16,6 +16,7 @@ public partial class HistoryWindow : Window
     private readonly List<string> _openedTempFiles = [];
     private bool _suppressFilter = true;
     private bool _locking;
+    private List<PrintJobRecord> _dayJobs = [];
 
     public HistoryWindow(byte[] masterKey)
     {
@@ -25,29 +26,71 @@ public partial class HistoryWindow : Window
         _store = new ArchiveStore(_crypto);
         _storage = new StorageManager(_store);
 
+        Timeline.JobClicked += job =>
+        {
+            JobsGrid.SelectedItem = _dayJobs.FirstOrDefault(j => j.Id == job.Id) ?? job;
+            JobsGrid.ScrollIntoView(JobsGrid.SelectedItem);
+        };
+
         PrinterFilter.Items.Clear();
         PrinterFilter.Items.Add("(All printers)");
         foreach (string printer in _store.Database.GetPrinters())
             PrinterFilter.Items.Add(printer);
         PrinterFilter.SelectedIndex = 0;
-        _suppressFilter = false;
 
+        DayPicker.SelectedDate = DateTime.Today;
+        _suppressFilter = false;
         Reload();
     }
+
+    private DateTime SelectedDay =>
+        DayPicker.SelectedDate?.Date ?? DateTime.Today;
 
     private void Reload()
     {
         string? search = string.IsNullOrWhiteSpace(SearchBox.Text) ? null : SearchBox.Text;
         string? printer = PrinterFilter.SelectedItem as string;
-        DateTimeOffset? from = FromDate.SelectedDate is DateTime fd
-            ? new DateTimeOffset(fd.Date) : null;
-        DateTimeOffset? to = ToDate.SelectedDate is DateTime td
-            ? new DateTimeOffset(td.Date.AddDays(1).AddTicks(-1)) : null;
+        var day = SelectedDay;
+        var from = new DateTimeOffset(day);
+        var to = new DateTimeOffset(day.AddDays(1).AddTicks(-1));
 
-        var jobs = _store.Query(search, printer, from, to);
+        var jobs = _store.Query(search, printer, from, to)
+            .OrderByDescending(j => j.Timestamp)
+            .ToList();
+
+        ApplyRepeatCounts(jobs);
+        _dayJobs = jobs;
+
         JobsGrid.ItemsSource = jobs;
-        UsageText.Text = "Storage " + _storage.FormatUsage();
+        Timeline.Jobs = jobs;
+        TimelineHeader.Text = $"Timeline for {day:yyyy-MM-dd}  (0:00 – 24:00)";
+        UsageText.Text = $"{jobs.Count} job(s) · Storage {_storage.FormatUsage()}";
+
+        if (JobsGrid.SelectedItem is PrintJobRecord selected)
+            Timeline.SelectedJobId = selected.Id;
         UpdateDetails(JobsGrid.SelectedItem as PrintJobRecord);
+    }
+
+    private static void ApplyRepeatCounts(List<PrintJobRecord> jobs)
+    {
+        // Repeats = how many times the same document was printed this day (case-insensitive).
+        var groups = jobs
+            .GroupBy(j => NormalizeDoc(j.DocumentName), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.OrderBy(x => x.Timestamp).ToList(), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var job in jobs)
+        {
+            string key = NormalizeDoc(job.DocumentName);
+            var list = groups[key];
+            job.RepeatCount = list.Count;
+            job.RepeatIndex = list.FindIndex(x => x.Id == job.Id) + 1;
+        }
+    }
+
+    private static string NormalizeDoc(string name)
+    {
+        string cleaned = DocumentCapture.CleanDocumentTitle(name);
+        return Path.GetFileName(cleaned).Trim().ToLowerInvariant();
     }
 
     private void FilterChanged(object sender, TextChangedEventArgs e)
@@ -62,13 +105,32 @@ public partial class HistoryWindow : Window
         Reload();
     }
 
-    private void ClearFilters_Click(object sender, RoutedEventArgs e)
+    private void DayChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressFilter) return;
+        Reload();
+    }
+
+    private void PrevDay_Click(object sender, RoutedEventArgs e)
     {
         _suppressFilter = true;
-        SearchBox.Text = "";
-        PrinterFilter.SelectedIndex = 0;
-        FromDate.SelectedDate = null;
-        ToDate.SelectedDate = null;
+        DayPicker.SelectedDate = SelectedDay.AddDays(-1);
+        _suppressFilter = false;
+        Reload();
+    }
+
+    private void NextDay_Click(object sender, RoutedEventArgs e)
+    {
+        _suppressFilter = true;
+        DayPicker.SelectedDate = SelectedDay.AddDays(1);
+        _suppressFilter = false;
+        Reload();
+    }
+
+    private void Today_Click(object sender, RoutedEventArgs e)
+    {
+        _suppressFilter = true;
+        DayPicker.SelectedDate = DateTime.Today;
         _suppressFilter = false;
         Reload();
     }
@@ -105,25 +167,30 @@ public partial class HistoryWindow : Window
         Close();
     }
 
-    private void JobsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
-        UpdateDetails(JobsGrid.SelectedItem as PrintJobRecord);
+    private void JobsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var job = JobsGrid.SelectedItem as PrintJobRecord;
+        Timeline.SelectedJobId = job?.Id;
+        UpdateDetails(job);
+    }
 
     private void UpdateDetails(PrintJobRecord? job)
     {
         if (job is null)
         {
             DetailTitle.Text = "Select a print job";
-            DetailBody.Text = "Double-click a row to decrypt and open the archived document when available.";
+            DetailBody.Text = "Use the day timeline or table. Green = success, amber = canceled, red = failed.";
             return;
         }
 
         DetailTitle.Text = job.DocumentName;
         DetailBody.Text =
-            $"Printed {job.Timestamp:yyyy-MM-dd HH:mm:ss} by {job.Username} on {job.PrinterName}\n" +
-            $"Pages: {job.PageCount?.ToString() ?? "-"}    Size: {(job.DataSize is long b ? StorageManager.FormatBytes(b) : "-")}\n" +
+            $"{job.PrintOutcome} at {job.Timestamp:yyyy-MM-dd HH:mm:ss} by {job.Username} on {job.PrinterName}\n" +
+            $"Duration: {job.DurationLabel}    Pages: {job.PageCount?.ToString() ?? "-"}    " +
+            $"Size: {(job.DataSize is long b ? StorageManager.FormatBytes(b) : "-")}\n" +
+            $"Repeats today: {job.RepeatLabel} (same document printed {job.RepeatCount} time(s))\n" +
             $"Capture: {job.CaptureStatus}\n" +
             $"Source: {job.OriginalFilePath ?? "-"}\n" +
-            $"Archive: {job.ArchiveFilePath ?? "-"}\n" +
             $"Screenshot: {job.ScreenshotPath ?? "-"}";
     }
 
@@ -141,7 +208,7 @@ public partial class HistoryWindow : Window
             {
                 MessageBox.Show(
                     "No encrypted document is archived for this job.\n\n" +
-                    "PrintArchive stores metadata for every completed print. Original files are archived only when the source path can be resolved.",
+                    "Originals are archived for successful prints when the source path can be resolved.",
                     "PrintArchive", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }

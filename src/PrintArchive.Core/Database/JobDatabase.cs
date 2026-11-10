@@ -30,12 +30,32 @@ public sealed class JobDatabase : IDisposable
                 ScreenshotPath TEXT,
                 CaptureStatus TEXT NOT NULL,
                 ClientComputer TEXT,
-                UserSid TEXT
+                UserSid TEXT,
+                PrintOutcome TEXT NOT NULL DEFAULT 'Success',
+                DurationSeconds INTEGER,
+                WindowsEventId INTEGER
             );
             CREATE INDEX IF NOT EXISTS IX_Jobs_Timestamp ON Jobs(Timestamp);
             CREATE INDEX IF NOT EXISTS IX_Jobs_Printer ON Jobs(PrinterName);
             CREATE INDEX IF NOT EXISTS IX_Jobs_Document ON Jobs(DocumentName);
             """);
+        EnsureColumn("PrintOutcome", "TEXT NOT NULL DEFAULT 'Success'");
+        EnsureColumn("DurationSeconds", "INTEGER");
+        EnsureColumn("WindowsEventId", "INTEGER");
+    }
+
+    private void EnsureColumn(string name, string definition)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "PRAGMA table_info(Jobs)";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), name, StringComparison.OrdinalIgnoreCase))
+                return;
+        }
+        reader.Close();
+        Execute($"ALTER TABLE Jobs ADD COLUMN {name} {definition}");
     }
 
     public bool ExistsByEventRecordId(long eventRecordId)
@@ -69,11 +89,11 @@ public sealed class JobDatabase : IDisposable
                 INSERT INTO Jobs (
                     Id, JobId, EventRecordId, DocumentName, Username, PrinterName, Timestamp,
                     PageCount, DataSize, OriginalFilePath, ArchiveFilePath, ScreenshotPath,
-                    CaptureStatus, ClientComputer, UserSid)
+                    CaptureStatus, ClientComputer, UserSid, PrintOutcome, DurationSeconds, WindowsEventId)
                 VALUES (
                     $Id, $JobId, $EventRecordId, $DocumentName, $Username, $PrinterName, $Timestamp,
                     $PageCount, $DataSize, $OriginalFilePath, $ArchiveFilePath, $ScreenshotPath,
-                    $CaptureStatus, $ClientComputer, $UserSid)
+                    $CaptureStatus, $ClientComputer, $UserSid, $PrintOutcome, $DurationSeconds, $WindowsEventId)
                 ON CONFLICT(Id) DO UPDATE SET
                     JobId=excluded.JobId,
                     EventRecordId=excluded.EventRecordId,
@@ -88,7 +108,10 @@ public sealed class JobDatabase : IDisposable
                     ScreenshotPath=excluded.ScreenshotPath,
                     CaptureStatus=excluded.CaptureStatus,
                     ClientComputer=excluded.ClientComputer,
-                    UserSid=excluded.UserSid;
+                    UserSid=excluded.UserSid,
+                    PrintOutcome=excluded.PrintOutcome,
+                    DurationSeconds=excluded.DurationSeconds,
+                    WindowsEventId=excluded.WindowsEventId;
                 """;
             Bind(cmd, record);
             try
@@ -182,9 +205,6 @@ public sealed class JobDatabase : IDisposable
         }
     }
 
-    /// <summary>
-    /// Jobs that still need a screenshot and/or original-file enrichment from the Agent.
-    /// </summary>
     public List<PrintJobRecord> QueryNeedingEnrichment(int limit = 25)
     {
         lock (_sync)
@@ -205,7 +225,6 @@ public sealed class JobDatabase : IDisposable
             return list;
         }
     }
-
 
     public void Delete(string id)
     {
@@ -252,26 +271,59 @@ public sealed class JobDatabase : IDisposable
         cmd.Parameters.AddWithValue("$CaptureStatus", r.CaptureStatus);
         cmd.Parameters.AddWithValue("$ClientComputer", (object?)r.ClientComputer ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$UserSid", (object?)r.UserSid ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$PrintOutcome", r.PrintOutcome);
+        cmd.Parameters.AddWithValue("$DurationSeconds", (object?)r.DurationSeconds ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$WindowsEventId", (object?)r.WindowsEventId ?? DBNull.Value);
     }
 
-    private static PrintJobRecord Read(SqliteDataReader reader) => new()
+    private static PrintJobRecord Read(SqliteDataReader reader)
     {
-        Id = reader.GetString(reader.GetOrdinal("Id")),
-        JobId = reader.IsDBNull(reader.GetOrdinal("JobId")) ? null : reader.GetInt32(reader.GetOrdinal("JobId")),
-        EventRecordId = reader.IsDBNull(reader.GetOrdinal("EventRecordId")) ? null : reader.GetInt64(reader.GetOrdinal("EventRecordId")),
-        DocumentName = reader.GetString(reader.GetOrdinal("DocumentName")),
-        Username = reader.GetString(reader.GetOrdinal("Username")),
-        PrinterName = reader.GetString(reader.GetOrdinal("PrinterName")),
-        Timestamp = DateTimeOffset.Parse(reader.GetString(reader.GetOrdinal("Timestamp"))),
-        PageCount = reader.IsDBNull(reader.GetOrdinal("PageCount")) ? null : reader.GetInt32(reader.GetOrdinal("PageCount")),
-        DataSize = reader.IsDBNull(reader.GetOrdinal("DataSize")) ? null : reader.GetInt64(reader.GetOrdinal("DataSize")),
-        OriginalFilePath = reader.IsDBNull(reader.GetOrdinal("OriginalFilePath")) ? null : reader.GetString(reader.GetOrdinal("OriginalFilePath")),
-        ArchiveFilePath = reader.IsDBNull(reader.GetOrdinal("ArchiveFilePath")) ? null : reader.GetString(reader.GetOrdinal("ArchiveFilePath")),
-        ScreenshotPath = reader.IsDBNull(reader.GetOrdinal("ScreenshotPath")) ? null : reader.GetString(reader.GetOrdinal("ScreenshotPath")),
-        CaptureStatus = reader.GetString(reader.GetOrdinal("CaptureStatus")),
-        ClientComputer = reader.IsDBNull(reader.GetOrdinal("ClientComputer")) ? null : reader.GetString(reader.GetOrdinal("ClientComputer")),
-        UserSid = reader.IsDBNull(reader.GetOrdinal("UserSid")) ? null : reader.GetString(reader.GetOrdinal("UserSid")),
-    };
+        int Ord(string name)
+        {
+            try { return reader.GetOrdinal(name); }
+            catch { return -1; }
+        }
+
+        string? GetStr(string name)
+        {
+            int o = Ord(name);
+            return o < 0 || reader.IsDBNull(o) ? null : reader.GetString(o);
+        }
+
+        int? GetInt(string name)
+        {
+            int o = Ord(name);
+            return o < 0 || reader.IsDBNull(o) ? null : reader.GetInt32(o);
+        }
+
+        long? GetLong(string name)
+        {
+            int o = Ord(name);
+            return o < 0 || reader.IsDBNull(o) ? null : reader.GetInt64(o);
+        }
+
+        return new PrintJobRecord
+        {
+            Id = reader.GetString(Ord("Id")),
+            JobId = GetInt("JobId"),
+            EventRecordId = GetLong("EventRecordId"),
+            DocumentName = reader.GetString(Ord("DocumentName")),
+            Username = reader.GetString(Ord("Username")),
+            PrinterName = reader.GetString(Ord("PrinterName")),
+            Timestamp = DateTimeOffset.Parse(reader.GetString(Ord("Timestamp"))),
+            PageCount = GetInt("PageCount"),
+            DataSize = GetLong("DataSize"),
+            OriginalFilePath = GetStr("OriginalFilePath"),
+            ArchiveFilePath = GetStr("ArchiveFilePath"),
+            ScreenshotPath = GetStr("ScreenshotPath"),
+            CaptureStatus = reader.GetString(Ord("CaptureStatus")),
+            ClientComputer = GetStr("ClientComputer"),
+            UserSid = GetStr("UserSid"),
+            PrintOutcome = GetStr("PrintOutcome") ?? PrintOutcomes.Success,
+            DurationSeconds = GetInt("DurationSeconds"),
+            WindowsEventId = GetInt("WindowsEventId"),
+        };
+    }
 
     public void Dispose() => _connection.Dispose();
 }
